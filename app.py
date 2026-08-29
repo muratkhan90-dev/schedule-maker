@@ -168,7 +168,28 @@ uploaded_file = st.file_uploader("📤 Загрузите Excel-файл", type=
 
 if uploaded_file:
     with st.spinner("⏳ Обработка файла..."):
-        df = pd.read_excel(uploaded_file, header=None)
+        df = pd.read_excel(uploaded_file)
+
+df.columns = [str(c).strip() for c in df.columns]
+
+rename_map = {}
+for col in df.columns:
+    low_col = col.lower()
+    if 'класс' in low_col:
+        rename_map[col] = 'Класс'
+    elif 'предмет' in low_col:
+        rename_map[col] = 'Предмет'
+    elif 'учитель' in low_col or 'часы' in low_col:
+        rename_map[col] = 'Учитель и часы'
+
+df.rename(columns=rename_map, inplace=True)
+
+if 'Класс' not in df.columns:
+    df.rename(columns={df.columns[0]: 'Класс'}, inplace=True)
+if 'Предмет' not in df.columns:
+    df.rename(columns={df.columns[1]: 'Предмет'}, inplace=True)
+if 'Учитель и часы' not in df.columns:
+    df.rename(columns={df.columns[2]: 'Учитель и часы'}, inplace=True)
         classes, class_teachers, subjects_data = parse_schedule_file(df)
         
         st.success(f"✅ Найдено {len(classes)} классов")
