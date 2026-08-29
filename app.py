@@ -1,14 +1,13 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-import re
 
 st.set_page_config(page_title="Автоматическое расписание", page_icon="📅", layout="wide")
 
 st.title("📅 Автоматическое составление расписания")
 st.markdown("Загрузите файл **сағат аты жөні сынып.xlsx** и получите готовое расписание без накладок")
 
-# --- Функция для чтения нового формата (3 колонки) ---
+# Обработка данных из Excel (3 колонки)
 def parse_schedule_file(df):
     classes = []
     class_teachers = {}
@@ -69,37 +68,77 @@ def parse_schedule_file(df):
 
     return classes, class_teachers, subjects_data
 
-# --- Функция для создания расписания ---
+# Умный алгоритм составления расписания
 def generate_schedule(classes, class_teachers, subjects_data, days, periods):
-    # Простейший алгоритм: на каждый день/урок ставим предмет, у которого есть часы
     schedule = {}
+    # Создаем пустую сетку для каждого класс
     for cls in classes:
         schedule[cls] = {}
         for day in days:
             schedule[cls][day] = {}
             for period in range(1, periods + 1):
                 schedule[cls][day][period] = None
-                
-        # Берем предметы для класса
+
+    # Следим за занятостью учителей: ключ = учитель, значение = список занятых слотов
+    teacher_busy = {}
+
+    # Собираем все уроки для каждого класса
+    for cls in classes:
+        # Предметы и учителя для конкретного класса
         items = []
         for subject, teachers in subjects_data.items():
             for teacher, hours in teachers.items():
                 if teacher in class_teachers.get(cls, {}):
+                    # Добавляем урок с количеством часов
                     items.append((subject, teacher, int(class_teachers[cls][teacher])))
         
-        # Распределяем предметы по дням и урокам (очень упрощенно)
+        # Сортируем предметы по количеству часов (от больших к меньшим) — так проще заполнять
+        items.sort(key=lambda x: -x[2])
+
+        # Распределяем уроки
         idx = 0
+        remaining_hours = {item[0]: item[2] for item in items}
+        
+        # Проходим по всем дням и урокам
         for day in days:
             for period in range(1, periods + 1):
-                if idx < len(items):
-                    schedule[cls][day][period] = {
-                        'subject': items[idx][0],
-                        'teacher': items[idx][1]
-                    }
+                if idx >= len(items):
+                    break
+
+                subject, teacher, total_hours = items[idx]
+                
+                # Проверяем, свободен ли учитель в это время
+                teacher_key = (teacher, day, period)
+                
+                # Если учитель занят, пробуем найти другое время (сдвигаем на следующий период)
+                # На самом деле, это очень упрощенная версия, но она поможет убрать большинство конфликтов
+                if teacher_key in teacher_busy:
+                    # Пробуем следующий период
+                    continue
+                
+                # Если свободен, ставим урок
+                schedule[cls][day][period] = {
+                    'subject': subject,
+                    'teacher': teacher
+                }
+                
+                # Помечаем учителя занятым
+                teacher_busy[teacher_key] = True
+                
+                # Уменьшаем количество оставшихся часов
+                remaining_hours[subject] -= 1
+                
+                # Если предмет закончился, переходим к следующему
+                if remaining_hours[subject] <= 0:
                     idx += 1
+                
+                # Если мы прошли все 5 дней, выходим
+                if idx >= len(items):
+                    break
+
     return schedule
 
-# --- Функция для проверки конфликтов ---
+# Функция для проверки конфликтов
 def check_conflicts(schedule, days, periods, classes):
     conflicts = []
     for day in days:
@@ -118,15 +157,13 @@ def check_conflicts(schedule, days, periods, classes):
                     conflicts.append(f"{day} {period}-урок: {teacher} занят в {', '.join(cls_list)}")
     return conflicts
 
-# --- Интерфейс загрузки файла ---
+# Интерфейс
 uploaded_file = st.file_uploader("📁 Загрузите Excel-файл", type=["xlsx"])
 
 if uploaded_file:
     with st.spinner("⏳ Обработка файла..."):
-        # Читаем файл
         df = pd.read_excel(uploaded_file)
         
-        # Автоматически переименовываем колонки
         df.columns = [str(c).strip() for c in df.columns]
         rename_map = {}
         for col in df.columns:
@@ -150,7 +187,7 @@ if uploaded_file:
         
         st.success(f"✅ Найдено {len(classes)} классов")
 
-        # Создаем расписание (5 дней, 7 уроков)
+        # Создаем расписание
         days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт']
         periods = 7
         
@@ -185,7 +222,6 @@ if uploaded_file:
         # Кнопка скачивания
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Записываем расписание в Excel
             for cls in classes:
                 data = []
                 for day in days:
@@ -199,7 +235,6 @@ if uploaded_file:
                     data.append(row)
                 pd.DataFrame(data).to_excel(writer, index=False, sheet_name=cls)
             
-            # Записываем нагрузку
             load_rows = []
             for cls in classes:
                 for subject, teachers in subjects_data.items():
