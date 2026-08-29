@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import random
 
 st.set_page_config(page_title="Автоматическое расписание", page_icon="📅", layout="wide")
 
 st.title("📅 Автоматическое составление расписания")
 st.markdown("Загрузите файл **сағат аты жөні сынып.xlsx** и получите готовое расписание без накладок")
 
-# Обработка данных из Excel (3 колонки)
 def parse_schedule_file(df):
     classes = []
     class_teachers = {}
@@ -68,10 +68,11 @@ def parse_schedule_file(df):
 
     return classes, class_teachers, subjects_data
 
-# Умный алгоритм составления расписания
+# ---- УМНЫЙ АЛГОРИТМ: случайное распределение с избеганием конфликтов ----
 def generate_schedule(classes, class_teachers, subjects_data, days, periods):
     schedule = {}
-    # Создаем пустую сетку для каждого класс
+    
+    # 1. Создаем пустую сетку для каждого класса
     for cls in classes:
         schedule[cls] = {}
         for day in days:
@@ -79,66 +80,62 @@ def generate_schedule(classes, class_teachers, subjects_data, days, periods):
             for period in range(1, periods + 1):
                 schedule[cls][day][period] = None
 
-    # Следим за занятостью учителей: ключ = учитель, значение = список занятых слотов
+    # 2. Следим за занятостью учителей (день + урок) -> ключ (teacher, day, period)
     teacher_busy = {}
 
-    # Собираем все уроки для каждого класса
+    # 3. Собираем для каждого класса список уроков с часами
     for cls in classes:
-        # Предметы и учителя для конкретного класса
         items = []
         for subject, teachers in subjects_data.items():
             for teacher, hours in teachers.items():
                 if teacher in class_teachers.get(cls, {}):
-                    # Добавляем урок с количеством часов
                     items.append((subject, teacher, int(class_teachers[cls][teacher])))
         
-        # Сортируем предметы по количеству часов (от больших к меньшим) — так проще заполнять
+        # Сортировка: предметы с большим количеством часов ставим первыми (чтобы они точно влезли)
         items.sort(key=lambda x: -x[2])
 
-        # Распределяем уроки
-        idx = 0
-        remaining_hours = {item[0]: item[2] for item in items}
-        
-        # Проходим по всем дням и урокам
-        for day in days:
-            for period in range(1, periods + 1):
-                if idx >= len(items):
-                    break
+        # 4. Расширяем список уроков (каждый час = отдельный урок)
+        # Например: "Математика 3 часа" превращается в 3 отдельных урока Математики
+        lesson_blocks = []
+        for subject, teacher, hours in items:
+            for _ in range(hours):
+                lesson_blocks.append((subject, teacher))
 
-                subject, teacher, total_hours = items[idx]
-                
-                # Проверяем, свободен ли учитель в это время
-                teacher_key = (teacher, day, period)
-                
-                # Если учитель занят, пробуем найти другое время (сдвигаем на следующий период)
-                # На самом деле, это очень упрощенная версия, но она поможет убрать большинство конфликтов
-                if teacher_key in teacher_busy:
-                    # Пробуем следующий период
-                    continue
-                
-                # Если свободен, ставим урок
-                schedule[cls][day][period] = {
-                    'subject': subject,
-                    'teacher': teacher
-                }
-                
-                # Помечаем учителя занятым
-                teacher_busy[teacher_key] = True
-                
-                # Уменьшаем количество оставшихся часов
-                remaining_hours[subject] -= 1
-                
-                # Если предмет закончился, переходим к следующему
-                if remaining_hours[subject] <= 0:
-                    idx += 1
-                
-                # Если мы прошли все 5 дней, выходим
-                if idx >= len(items):
+        # Добавляем пустые блоки (если часов меньше, чем слотов в сетке)
+        total_slots = len(days) * periods
+        if len(lesson_blocks) < total_slots:
+            # Добавляем "окна" в конец, чтобы не заполнять всё подряд
+            for _ in range(total_slots - len(lesson_blocks)):
+                lesson_blocks.append((None, None))
+
+        # 5. Случайно перемешиваем блоки, чтобы предметы не шли подряд
+        random.shuffle(lesson_blocks)
+
+        # 6. Пытаемся разместить блоки в сетке
+        for subject, teacher in lesson_blocks:
+            if subject is None:
+                continue  # Это "окно", пропускаем
+            
+            # Пытаемся найти свободное место для этого урока
+            placed = False
+            for day in days:
+                if placed:
                     break
+                for period in range(1, periods + 1):
+                    if placed:
+                        break
+                    
+                    # Проверяем, свободен ли слот в классе и свободен ли учитель
+                    if schedule[cls][day][period] is None:
+                        teacher_key = (teacher, day, period)
+                        if teacher_key not in teacher_busy:
+                            # Ставим урок!
+                            schedule[cls][day][period] = {'subject': subject, 'teacher': teacher}
+                            teacher_busy[teacher_key] = True
+                            placed = True
 
     return schedule
 
-# Функция для проверки конфликтов
 def check_conflicts(schedule, days, periods, classes):
     conflicts = []
     for day in days:
