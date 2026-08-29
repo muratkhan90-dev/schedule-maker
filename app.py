@@ -1,13 +1,14 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import re
 
 st.set_page_config(page_title="Автоматическое расписание", page_icon="📅", layout="wide")
 
 st.title("📅 Автоматическое составление расписания")
 st.markdown("Загрузите файл **сағат аты жөні сынып.xlsx** и получите готовое расписание без накладок")
 
-# Функция для обработки нового формата (Класс, Предмет, Учитель и часы)
+# --- Функция для чтения нового формата (3 колонки) ---
 def parse_schedule_file(df):
     classes = []
     class_teachers = {}
@@ -68,22 +69,56 @@ def parse_schedule_file(df):
 
     return classes, class_teachers, subjects_data
 
-# Функция для создания итогового листа (упрощенная версия)
-def create_load_sheet(classes, class_teachers, subjects_data):
-    rows = []
+# --- Функция для создания расписания ---
+def generate_schedule(classes, class_teachers, subjects_data, days, periods):
+    # Простейший алгоритм: на каждый день/урок ставим предмет, у которого есть часы
+    schedule = {}
     for cls in classes:
+        schedule[cls] = {}
+        for day in days:
+            schedule[cls][day] = {}
+            for period in range(1, periods + 1):
+                schedule[cls][day][period] = None
+                
+        # Берем предметы для класса
+        items = []
         for subject, teachers in subjects_data.items():
             for teacher, hours in teachers.items():
                 if teacher in class_teachers.get(cls, {}):
-                    rows.append({
-                        'Класс': cls,
-                        'Предмет': subject,
-                        'Учитель': teacher,
-                        'Часы': hours
-                    })
-    return pd.DataFrame(rows)
+                    items.append((subject, teacher, int(class_teachers[cls][teacher])))
+        
+        # Распределяем предметы по дням и урокам (очень упрощенно)
+        idx = 0
+        for day in days:
+            for period in range(1, periods + 1):
+                if idx < len(items):
+                    schedule[cls][day][period] = {
+                        'subject': items[idx][0],
+                        'teacher': items[idx][1]
+                    }
+                    idx += 1
+    return schedule
 
-# Интерфейс загрузки файла
+# --- Функция для проверки конфликтов ---
+def check_conflicts(schedule, days, periods, classes):
+    conflicts = []
+    for day in days:
+        for period in range(1, periods + 1):
+            teachers_today = {}
+            for cls in classes:
+                item = schedule[cls][day][period]
+                if item:
+                    teacher = item['teacher']
+                    if teacher not in teachers_today:
+                        teachers_today[teacher] = []
+                    teachers_today[teacher].append(cls)
+            
+            for teacher, cls_list in teachers_today.items():
+                if len(cls_list) > 1:
+                    conflicts.append(f"{day} {period}-урок: {teacher} занят в {', '.join(cls_list)}")
+    return conflicts
+
+# --- Интерфейс загрузки файла ---
 uploaded_file = st.file_uploader("📁 Загрузите Excel-файл", type=["xlsx"])
 
 if uploaded_file:
@@ -104,7 +139,6 @@ if uploaded_file:
                 rename_map[col] = 'Учитель и часы'
         df.rename(columns=rename_map, inplace=True)
 
-        # Если не нашли по названиям, берем первые 3 колонки
         if 'Класс' not in df.columns:
             df.rename(columns={df.columns[0]: 'Класс'}, inplace=True)
         if 'Предмет' not in df.columns:
@@ -116,15 +150,69 @@ if uploaded_file:
         
         st.success(f"✅ Найдено {len(classes)} классов")
 
-        # Отображаем данные
-        st.subheader("📊 Данные по классам")
-        load_df = create_load_sheet(classes, class_teachers, subjects_data)
-        st.dataframe(load_df, use_container_width=True)
+        # Создаем расписание (5 дней, 7 уроков)
+        days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт']
+        periods = 7
+        
+        schedule = generate_schedule(classes, class_teachers, subjects_data, days, periods)
+        conflicts = check_conflicts(schedule, days, periods, classes)
+
+        # Показываем расписание
+        st.subheader("📅 Расписание уроков")
+        for cls in classes:
+            with st.expander(f"Класс {cls}"):
+                data = []
+                for day in days:
+                    row = {'День': day}
+                    for period in range(1, periods + 1):
+                        item = schedule[cls][day][period]
+                        if item:
+                            row[f"{period}-урок"] = f"{item['subject']} ({item['teacher']})"
+                        else:
+                            row[f"{period}-урок"] = ""
+                    data.append(row)
+                st.table(pd.DataFrame(data))
+
+        # Проверка конфликтов
+        st.subheader("⚠️ Проверка конфликтов")
+        if conflicts:
+            st.error(f"Найдено {len(conflicts)} конфликтов")
+            for c in conflicts:
+                st.write(f"❌ {c}")
+        else:
+            st.success("✅ Конфликтов нет! Расписание составлено корректно.")
 
         # Кнопка скачивания
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            load_df.to_excel(writer, index=False, sheet_name='Нагрузка')
+            # Записываем расписание в Excel
+            for cls in classes:
+                data = []
+                for day in days:
+                    row = {'День': day}
+                    for period in range(1, periods + 1):
+                        item = schedule[cls][day][period]
+                        if item:
+                            row[f"{period}-урок"] = f"{item['subject']} ({item['teacher']})"
+                        else:
+                            row[f"{period}-урок"] = ""
+                    data.append(row)
+                pd.DataFrame(data).to_excel(writer, index=False, sheet_name=cls)
+            
+            # Записываем нагрузку
+            load_rows = []
+            for cls in classes:
+                for subject, teachers in subjects_data.items():
+                    for teacher, hours in teachers.items():
+                        if teacher in class_teachers.get(cls, {}):
+                            load_rows.append({
+                                'Класс': cls,
+                                'Предмет': subject,
+                                'Учитель': teacher,
+                                'Часы': hours
+                            })
+            pd.DataFrame(load_rows).to_excel(writer, index=False, sheet_name='Нагрузка')
+            
         processed_data = output.getvalue()
 
         st.download_button(
